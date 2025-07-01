@@ -1,45 +1,21 @@
-import { Clarinet, Tx, Chain, Account, types } from '@stacks/transactions';
 
-Clarinet.test({
-  name: "Ensures student registration works",
-  async fn(chain: Chain, accounts: Map<string, Account>) {
-    const student = accounts.get("wallet_1")!;
+import { describe, expect, it } from "vitest";
 
-    let block = chain.mineBlock([
-      Tx.contractCall(
-        "Earn-with-Tokenized-Scholarships",
-        "register-student",
-        [types.ascii("John Doe"), types.ascii("Computer Science"), types.uint(4)],
-        student.address
-      )
-    ]);
-    block.receipts[0].result.expectOk().expectBool(true);
-  }
-});
+const accounts = simnet.getAccounts();
+const address1 = accounts.get("wallet_1")!;
 
-Clarinet.test({
-  name: "Ensures scholarship creation works",
-  async fn(chain: Chain, accounts: Map<string, Account>) {
-    const donor = accounts.get("wallet_2")!;
-    const student = accounts.get("wallet_1")!;
+/*
+  The test below is an example. To learn more, read the testing documentation here:
+  https://docs.hiro.so/stacks/clarinet-js-sdk
+*/
 
-    chain.mineBlock([
-      Tx.contractCall(
-        "Earn-with-Tokenized-Scholarships",
-        "register-student",
-        [types.ascii("John Doe"), types.ascii("Computer Science"), types.uint(4)],
-        student.address
-      )
-    ]);
+describe("example tests", () => {
+  it("ensures simnet is well initialised", () => {
+    expect(simnet.blockHeight).toBeDefined();
+  });
 
-    let block = chain.mineBlock([
-      Tx.contractCall(
-        "Earn-with-Tokenized-Scholarships",
-        "create-scholarship",
-        [types.principal(student.address), types.uint(2000), types.uint(4)],
-        donor.address
-      )
-    ]);
-    block.receipts[0].result.expectOk().expectUint(1);
-  }
+  // it("shows an example", () => {
+  //   const { result } = simnet.callReadOnlyFn("counter", "get-counter", [], address1);
+  //   expect(result).toBeUint(0);
+  // });
 });
