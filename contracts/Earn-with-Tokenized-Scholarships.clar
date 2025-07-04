@@ -171,3 +171,253 @@
         (ok true)
     )
 )
+
+(define-constant err-submission-not-found (err u107))
+(define-constant err-already-submitted (err u108))
+(define-constant err-already-reviewed (err u109))
+
+(define-map MilestoneSubmissions
+    {
+        student: principal,
+        scholarship-id: uint,
+        milestone-number: uint,
+    }
+    {
+        proof-url: (string-ascii 200),
+        submission-time: uint,
+        status: (string-ascii 20),
+        reviewer: (optional principal),
+        review-time: (optional uint),
+        review-notes: (optional (string-ascii 500)),
+    }
+)
+
+(define-public (submit-milestone-proof
+        (scholarship-id uint)
+        (milestone-number uint)
+        (proof-url (string-ascii 200))
+    )
+    (let (
+            (student-data (unwrap! (map-get? Students tx-sender) err-not-registered))
+            (scholarship (unwrap! (map-get? Scholarships scholarship-id) err-not-registered))
+            (submission-key {
+                student: tx-sender,
+                scholarship-id: scholarship-id,
+                milestone-number: milestone-number,
+            })
+        )
+        (asserts! (is-eq tx-sender (get student scholarship)) err-unauthorized)
+        (asserts! (is-none (map-get? MilestoneSubmissions submission-key))
+            err-already-submitted
+        )
+        (asserts! (< milestone-number (get total-milestones student-data))
+            err-invalid-milestone
+        )
+        (map-set MilestoneSubmissions submission-key {
+            proof-url: proof-url,
+            submission-time: burn-block-height,
+            status: "pending",
+            reviewer: none,
+            review-time: none,
+            review-notes: none,
+        })
+        (ok true)
+    )
+)
+
+(define-public (review-milestone-submission
+        (student principal)
+        (scholarship-id uint)
+        (milestone-number uint)
+        (approved bool)
+        (review-notes (string-ascii 500))
+    )
+    (let (
+            (mentor-data (unwrap! (map-get? Mentors tx-sender) err-not-registered))
+            (submission-key {
+                student: student,
+                scholarship-id: scholarship-id,
+                milestone-number: milestone-number,
+            })
+            (submission (unwrap! (map-get? MilestoneSubmissions submission-key)
+                err-submission-not-found
+            ))
+        )
+        (asserts! (get verified mentor-data) err-unauthorized)
+        (asserts! (is-eq (get status submission) "pending") err-already-reviewed)
+        (map-set MilestoneSubmissions submission-key
+            (merge submission {
+                status: (if approved
+                    "approved"
+                    "rejected"
+                ),
+                reviewer: (some tx-sender),
+                review-time: (some burn-block-height),
+                review-notes: (some review-notes),
+            })
+        )
+        (if approved
+            (complete-milestone student scholarship-id)
+            (ok true)
+        )
+    )
+)
+
+(define-read-only (get-milestone-submission
+        (student principal)
+        (scholarship-id uint)
+        (milestone-number uint)
+    )
+    (ok (map-get? MilestoneSubmissions {
+        student: student,
+        scholarship-id: scholarship-id,
+        milestone-number: milestone-number,
+    }))
+)
+
+(define-constant err-request-not-found (err u110))
+(define-constant err-bid-not-found (err u111))
+(define-constant err-request-closed (err u112))
+(define-constant err-invalid-bid (err u113))
+
+(define-data-var scholarship-request-counter uint u0)
+(define-data-var bid-counter uint u0)
+
+(define-map ScholarshipRequests
+    uint
+    {
+        student: principal,
+        title: (string-ascii 100),
+        description: (string-ascii 500),
+        requested-amount: uint,
+        duration-blocks: uint,
+        status: (string-ascii 20),
+        created-at: uint,
+        selected-bid: (optional uint),
+    }
+)
+
+(define-map ScholarshipBids
+    uint
+    {
+        request-id: uint,
+        donor: principal,
+        offered-amount: uint,
+        milestones: uint,
+        terms: (string-ascii 300),
+        created-at: uint,
+        status: (string-ascii 20),
+    }
+)
+
+(define-public (create-scholarship-request
+        (title (string-ascii 100))
+        (description (string-ascii 500))
+        (requested-amount uint)
+        (duration-blocks uint)
+    )
+    (let (
+            (student-data (unwrap! (map-get? Students tx-sender) err-not-registered))
+            (request-id (+ (var-get scholarship-request-counter) u1))
+        )
+        (var-set scholarship-request-counter request-id)
+        (map-set ScholarshipRequests request-id {
+            student: tx-sender,
+            title: title,
+            description: description,
+            requested-amount: requested-amount,
+            duration-blocks: duration-blocks,
+            status: "open",
+            created-at: burn-block-height,
+            selected-bid: none,
+        })
+        (ok request-id)
+    )
+)
+
+(define-public (place-scholarship-bid
+        (request-id uint)
+        (offered-amount uint)
+        (milestones uint)
+        (terms (string-ascii 300))
+    )
+    (let (
+            (request (unwrap! (map-get? ScholarshipRequests request-id)
+                err-request-not-found
+            ))
+            (bid-id (+ (var-get bid-counter) u1))
+        )
+        (asserts! (is-eq (get status request) "open") err-request-closed)
+        (asserts! (>= offered-amount (var-get min-stake-amount)) err-invalid-bid)
+        (asserts!
+            (< burn-block-height
+                (+ (get created-at request) (get duration-blocks request))
+            )
+            err-request-closed
+        )
+        (var-set bid-counter bid-id)
+        (map-set ScholarshipBids bid-id {
+            request-id: request-id,
+            donor: tx-sender,
+            offered-amount: offered-amount,
+            milestones: milestones,
+            terms: terms,
+            created-at: burn-block-height,
+            status: "pending",
+        })
+        (ok bid-id)
+    )
+)
+
+(define-public (accept-scholarship-bid (bid-id uint))
+    (let (
+            (bid (unwrap! (map-get? ScholarshipBids bid-id) err-bid-not-found))
+            (request (unwrap! (map-get? ScholarshipRequests (get request-id bid))
+                err-request-not-found
+            ))
+        )
+        (asserts! (is-eq tx-sender (get student request)) err-unauthorized)
+        (asserts! (is-eq (get status request) "open") err-request-closed)
+        (asserts! (is-eq (get status bid) "pending") err-invalid-bid)
+        (try! (stx-transfer? (get offered-amount bid) (get donor bid)
+            (as-contract tx-sender)
+        ))
+        (map-set ScholarshipRequests (get request-id bid)
+            (merge request {
+                status: "funded",
+                selected-bid: (some bid-id),
+            })
+        )
+        (map-set ScholarshipBids bid-id (merge bid { status: "accepted" }))
+        (let ((scholarship-id (+ (var-get scholarship-counter) u1)))
+            (var-set scholarship-counter scholarship-id)
+            (map-set Scholarships scholarship-id {
+                donor: (get donor bid),
+                student: tx-sender,
+                amount: (get offered-amount bid),
+                milestones: (get milestones bid),
+                active: true,
+            })
+            (ok scholarship-id)
+        )
+    )
+)
+
+(define-read-only (get-scholarship-request (request-id uint))
+    (ok (map-get? ScholarshipRequests request-id))
+)
+
+(define-read-only (get-scholarship-bid (bid-id uint))
+    (ok (map-get? ScholarshipBids bid-id))
+)
+
+(define-public (close-scholarship-request (request-id uint))
+    (let ((request (unwrap! (map-get? ScholarshipRequests request-id) err-request-not-found)))
+        (asserts! (is-eq tx-sender (get student request)) err-unauthorized)
+        (asserts! (is-eq (get status request) "open") err-request-closed)
+        (map-set ScholarshipRequests request-id
+            (merge request { status: "closed" })
+        )
+        (ok true)
+    )
+)
