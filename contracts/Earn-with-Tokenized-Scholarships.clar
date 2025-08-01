@@ -82,6 +82,11 @@
             milestones: milestones,
             active: true,
         })
+        (map-set ScholarshipActivity scholarship-id {
+            last-activity: burn-block-height,
+            emergency-request: none,
+            emergency-approved: false,
+        })
         (ok scholarship-id)
     )
 )
@@ -137,6 +142,17 @@
                     completed-milestones: (+ (get completed-milestones student-data) u1),
                     funds-released: (+ (get funds-released student-data) student-amount),
                 })
+            )
+            (let ((activity (default-to {
+                    last-activity: u0,
+                    emergency-request: none,
+                    emergency-approved: false,
+                }
+                    (map-get? ScholarshipActivity scholarship-id)
+                )))
+                (map-set ScholarshipActivity scholarship-id
+                    (merge activity { last-activity: burn-block-height })
+                )
             )
             (ok true)
         )
@@ -279,9 +295,22 @@
 (define-constant err-bid-not-found (err u111))
 (define-constant err-request-closed (err u112))
 (define-constant err-invalid-bid (err u113))
+(define-constant err-scholarship-not-inactive (err u114))
+(define-constant err-emergency-cooldown (err u115))
+(define-constant err-no-emergency-pending (err u116))
 
 (define-data-var scholarship-request-counter uint u0)
 (define-data-var bid-counter uint u0)
+(define-data-var inactivity-threshold uint u1000)
+
+(define-map ScholarshipActivity
+    uint
+    {
+        last-activity: uint,
+        emergency-request: (optional uint),
+        emergency-approved: bool,
+    }
+)
 
 (define-map ScholarshipRequests
     uint
@@ -398,6 +427,11 @@
                 milestones: (get milestones bid),
                 active: true,
             })
+            (map-set ScholarshipActivity scholarship-id {
+                last-activity: burn-block-height,
+                emergency-request: none,
+                emergency-approved: false,
+            })
             (ok scholarship-id)
         )
     )
@@ -418,6 +452,110 @@
         (map-set ScholarshipRequests request-id
             (merge request { status: "closed" })
         )
+        (ok true)
+    )
+)
+
+(define-public (request-emergency-release (scholarship-id uint))
+    (let (
+            (scholarship (unwrap! (map-get? Scholarships scholarship-id) err-not-registered))
+            (activity (default-to {
+                last-activity: u0,
+                emergency-request: none,
+                emergency-approved: false,
+            }
+                (map-get? ScholarshipActivity scholarship-id)
+            ))
+        )
+        (asserts! (is-eq tx-sender (get student scholarship)) err-unauthorized)
+        (asserts! (get active scholarship) err-invalid-milestone)
+        (asserts! (is-none (get emergency-request activity))
+            err-already-submitted
+        )
+        (map-set ScholarshipActivity scholarship-id
+            (merge activity { emergency-request: (some burn-block-height) })
+        )
+        (ok true)
+    )
+)
+
+(define-public (approve-emergency-release (scholarship-id uint))
+    (let (
+            (mentor-data (unwrap! (map-get? Mentors tx-sender) err-not-registered))
+            (scholarship (unwrap! (map-get? Scholarships scholarship-id) err-not-registered))
+            (activity (unwrap! (map-get? ScholarshipActivity scholarship-id)
+                err-not-registered
+            ))
+        )
+        (asserts! (get verified mentor-data) err-unauthorized)
+        (asserts! (is-some (get emergency-request activity))
+            err-no-emergency-pending
+        )
+        (asserts! (not (get emergency-approved activity)) err-already-reviewed)
+        (let (
+                (remaining-amount (/ (get amount scholarship) u2))
+                (platform-fee (/ (* remaining-amount (var-get platform-fee-percent)) u100))
+                (student-amount (- remaining-amount platform-fee))
+            )
+            (try! (as-contract (stx-transfer? student-amount (as-contract tx-sender)
+                (get student scholarship)
+            )))
+            (try! (as-contract (stx-transfer? platform-fee (as-contract tx-sender) contract-owner)))
+            (map-set ScholarshipActivity scholarship-id
+                (merge activity { emergency-approved: true })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (refund-inactive-scholarship (scholarship-id uint))
+    (let (
+            (scholarship (unwrap! (map-get? Scholarships scholarship-id) err-not-registered))
+            (activity (unwrap! (map-get? ScholarshipActivity scholarship-id)
+                err-not-registered
+            ))
+            (student-data (unwrap! (map-get? Students (get student scholarship))
+                err-not-registered
+            ))
+        )
+        (asserts! (is-eq tx-sender (get donor scholarship)) err-unauthorized)
+        (asserts! (get active scholarship) err-invalid-milestone)
+        (asserts!
+            (> burn-block-height
+                (+ (get last-activity activity) (var-get inactivity-threshold))
+            )
+            err-scholarship-not-inactive
+        )
+        (let (
+                (completed-milestones (get completed-milestones student-data))
+                (total-milestones (get total-milestones student-data))
+                (milestone-amount (/ (get amount scholarship) (get milestones scholarship)))
+                (completed-amount (* completed-milestones milestone-amount))
+                (remaining-amount (- (get amount scholarship) completed-amount))
+            )
+            (if (> remaining-amount u0)
+                (try! (as-contract (stx-transfer? remaining-amount (as-contract tx-sender)
+                    (get donor scholarship)
+                )))
+                true
+            )
+            (map-set Scholarships scholarship-id
+                (merge scholarship { active: false })
+            )
+            (ok remaining-amount)
+        )
+    )
+)
+
+(define-read-only (get-scholarship-activity (scholarship-id uint))
+    (ok (map-get? ScholarshipActivity scholarship-id))
+)
+
+(define-public (update-inactivity-threshold (new-threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set inactivity-threshold new-threshold)
         (ok true)
     )
 )
