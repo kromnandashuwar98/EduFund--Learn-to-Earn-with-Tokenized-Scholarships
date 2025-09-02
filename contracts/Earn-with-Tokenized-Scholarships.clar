@@ -43,6 +43,15 @@
 
 (define-data-var scholarship-counter uint u0)
 
+(define-map ScholarshipActivity
+    uint
+    {
+        last-activity: uint,
+        emergency-request: (optional uint),
+        emergency-approved: bool,
+    }
+)
+
 (define-public (register-student
         (name (string-ascii 50))
         (course (string-ascii 100))
@@ -298,17 +307,39 @@
 (define-constant err-scholarship-not-inactive (err u114))
 (define-constant err-emergency-cooldown (err u115))
 (define-constant err-no-emergency-pending (err u116))
+(define-constant err-pool-not-found (err u117))
+(define-constant err-pool-closed (err u118))
+(define-constant err-pool-not-expired (err u119))
+(define-constant err-target-not-met (err u120))
+(define-constant err-already-contributed (err u121))
 
 (define-data-var scholarship-request-counter uint u0)
 (define-data-var bid-counter uint u0)
 (define-data-var inactivity-threshold uint u1000)
+(define-data-var pool-counter uint u0)
 
-(define-map ScholarshipActivity
+(define-map ScholarshipPools
     uint
     {
-        last-activity: uint,
-        emergency-request: (optional uint),
-        emergency-approved: bool,
+        creator: principal,
+        student: principal,
+        target-amount: uint,
+        current-amount: uint,
+        deadline: uint,
+        milestones: uint,
+        status: (string-ascii 20),
+        created-at: uint,
+    }
+)
+
+(define-map PoolContributions
+    {
+        pool-id: uint,
+        contributor: principal,
+    }
+    {
+        amount: uint,
+        timestamp: uint,
     }
 )
 
@@ -558,4 +589,134 @@
         (var-set inactivity-threshold new-threshold)
         (ok true)
     )
+)
+
+(define-public (create-scholarship-pool
+        (student principal)
+        (target-amount uint)
+        (deadline-blocks uint)
+        (milestones uint)
+    )
+    (let (
+            (student-data (unwrap! (map-get? Students student) err-not-registered))
+            (pool-id (+ (var-get pool-counter) u1))
+            (deadline (+ burn-block-height deadline-blocks))
+        )
+        (asserts! (>= target-amount (var-get min-stake-amount))
+            err-insufficient-funds
+        )
+        (var-set pool-counter pool-id)
+        (map-set ScholarshipPools pool-id {
+            creator: tx-sender,
+            student: student,
+            target-amount: target-amount,
+            current-amount: u0,
+            deadline: deadline,
+            milestones: milestones,
+            status: "active",
+            created-at: burn-block-height,
+        })
+        (ok pool-id)
+    )
+)
+
+(define-public (contribute-to-pool
+        (pool-id uint)
+        (amount uint)
+    )
+    (let (
+            (pool (unwrap! (map-get? ScholarshipPools pool-id) err-pool-not-found))
+            (contribution-key {
+                pool-id: pool-id,
+                contributor: tx-sender,
+            })
+        )
+        (asserts! (is-eq (get status pool) "active") err-pool-closed)
+        (asserts! (< burn-block-height (get deadline pool)) err-pool-closed)
+        (asserts! (is-none (map-get? PoolContributions contribution-key))
+            err-already-contributed
+        )
+        (asserts! (>= amount u100) err-insufficient-funds)
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (map-set PoolContributions contribution-key {
+            amount: amount,
+            timestamp: burn-block-height,
+        })
+        (let ((new-amount (+ (get current-amount pool) amount)))
+            (map-set ScholarshipPools pool-id
+                (merge pool { current-amount: new-amount })
+            )
+            (ok new-amount)
+        )
+    )
+)
+
+(define-public (finalize-pool (pool-id uint))
+    (let ((pool (unwrap! (map-get? ScholarshipPools pool-id) err-pool-not-found)))
+        (asserts! (is-eq (get status pool) "active") err-pool-closed)
+        (asserts! (>= burn-block-height (get deadline pool)) err-pool-not-expired)
+        (if (>= (get current-amount pool) (get target-amount pool))
+            (begin
+                (map-set ScholarshipPools pool-id
+                    (merge pool { status: "funded" })
+                )
+                (let ((scholarship-id (+ (var-get scholarship-counter) u1)))
+                    (var-set scholarship-counter scholarship-id)
+                    (map-set Scholarships scholarship-id {
+                        donor: (get creator pool),
+                        student: (get student pool),
+                        amount: (get current-amount pool),
+                        milestones: (get milestones pool),
+                        active: true,
+                    })
+                    (map-set ScholarshipActivity scholarship-id {
+                        last-activity: burn-block-height,
+                        emergency-request: none,
+                        emergency-approved: false,
+                    })
+                    (ok scholarship-id)
+                )
+            )
+            (begin
+                (map-set ScholarshipPools pool-id
+                    (merge pool { status: "failed" })
+                )
+                (ok u0)
+            )
+        )
+    )
+)
+
+(define-public (claim-pool-refund (pool-id uint))
+    (let (
+            (pool (unwrap! (map-get? ScholarshipPools pool-id) err-pool-not-found))
+            (contribution-key {
+                pool-id: pool-id,
+                contributor: tx-sender,
+            })
+            (contribution (unwrap! (map-get? PoolContributions contribution-key)
+                err-not-registered
+            ))
+        )
+        (asserts! (is-eq (get status pool) "failed") err-target-not-met)
+        (try! (as-contract (stx-transfer? (get amount contribution) (as-contract tx-sender)
+            tx-sender
+        )))
+        (map-delete PoolContributions contribution-key)
+        (ok (get amount contribution))
+    )
+)
+
+(define-read-only (get-pool-info (pool-id uint))
+    (ok (map-get? ScholarshipPools pool-id))
+)
+
+(define-read-only (get-pool-contribution
+        (pool-id uint)
+        (contributor principal)
+    )
+    (ok (map-get? PoolContributions {
+        pool-id: pool-id,
+        contributor: contributor,
+    }))
 )
