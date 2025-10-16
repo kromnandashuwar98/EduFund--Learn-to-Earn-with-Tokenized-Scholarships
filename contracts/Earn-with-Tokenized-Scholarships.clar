@@ -720,3 +720,337 @@
         contributor: contributor,
     }))
 )
+
+;; === PERFORMANCE ANALYTICS & ACHIEVEMENT SYSTEM ===
+;; Independent feature for tracking student performance and achievements
+
+;; New error constants for achievement system
+(define-constant err-achievement-exists (err u122))
+(define-constant err-achievement-not-found (err u123))
+(define-constant err-invalid-score (err u124))
+(define-constant err-achievement-locked (err u125))
+
+;; System configuration variables
+(define-data-var achievement-counter uint u0)
+(define-data-var min-performance-score uint u60)
+(define-data-var max-achievements-per-student uint u50)
+
+;; Student Performance Analytics
+(define-map StudentPerformance
+    principal
+    {
+        total-achievements: uint,
+        performance-score: uint,
+        milestone-completion-rate: uint,
+        average-submission-time: uint,
+        consistency-streak: uint,
+        last-activity-block: uint,
+        total-points-earned: uint,
+    }
+)
+
+;; Achievement Badge System
+(define-map Achievements
+    uint
+    {
+        student: principal,
+        achievement-type: (string-ascii 30),
+        title: (string-ascii 100),
+        description: (string-ascii 200),
+        points-awarded: uint,
+        earned-at: uint,
+        verified-by: (optional principal),
+        metadata: (string-ascii 150),
+    }
+)
+
+;; Performance Metrics Tracking
+(define-map PerformanceMetrics
+    {
+        student: principal,
+        metric-type: (string-ascii 20),
+    }
+    {
+        value: uint,
+        last-updated: uint,
+        trend: (string-ascii 10),
+    }
+)
+
+;; Achievement Templates (predefined achievement types)
+(define-map AchievementTemplates
+    (string-ascii 30)
+    {
+        title: (string-ascii 100),
+        description: (string-ascii 200),
+        points: uint,
+        requirements: (string-ascii 150),
+        category: (string-ascii 20),
+    }
+)
+
+;; Public function to award achievement to student
+(define-public (award-achievement
+        (student principal)
+        (achievement-type (string-ascii 30))
+        (metadata (string-ascii 150))
+    )
+    (let (
+            (mentor-data (unwrap! (map-get? Mentors tx-sender) err-not-registered))
+            (student-data (unwrap! (map-get? Students student) err-not-registered))
+            (template (unwrap! (map-get? AchievementTemplates achievement-type)
+                err-achievement-not-found
+            ))
+            (achievement-id (+ (var-get achievement-counter) u1))
+            (current-performance (default-to {
+                total-achievements: u0,
+                performance-score: u0,
+                milestone-completion-rate: u0,
+                average-submission-time: u0,
+                consistency-streak: u0,
+                last-activity-block: u0,
+                total-points-earned: u0,
+            }
+                (map-get? StudentPerformance student)
+            ))
+        )
+        (asserts! (get verified mentor-data) err-unauthorized)
+        (asserts!
+            (< (get total-achievements current-performance)
+                (var-get max-achievements-per-student)
+            )
+            err-achievement-locked
+        )
+        (var-set achievement-counter achievement-id)
+        (map-set Achievements achievement-id {
+            student: student,
+            achievement-type: achievement-type,
+            title: (get title template),
+            description: (get description template),
+            points-awarded: (get points template),
+            earned-at: burn-block-height,
+            verified-by: (some tx-sender),
+            metadata: metadata,
+        })
+        (map-set StudentPerformance student
+            (merge current-performance {
+                total-achievements: (+ (get total-achievements current-performance) u1),
+                total-points-earned: (+ (get total-points-earned current-performance)
+                    (get points template)
+                ),
+                last-activity-block: burn-block-height,
+            })
+        )
+        (ok achievement-id)
+    )
+)
+
+;; Update student performance metrics
+(define-public (update-performance-score
+        (student principal)
+        (new-score uint)
+        (completion-rate uint)
+    )
+    (let (
+            (mentor-data (unwrap! (map-get? Mentors tx-sender) err-not-registered))
+            (current-performance (default-to {
+                total-achievements: u0,
+                performance-score: u0,
+                milestone-completion-rate: u0,
+                average-submission-time: u0,
+                consistency-streak: u0,
+                last-activity-block: u0,
+                total-points-earned: u0,
+            }
+                (map-get? StudentPerformance student)
+            ))
+        )
+        (asserts! (get verified mentor-data) err-unauthorized)
+        (asserts! (<= new-score u100) err-invalid-score)
+        (asserts! (<= completion-rate u100) err-invalid-score)
+        (let (
+                (streak (if (>= new-score (var-get min-performance-score))
+                    (+ (get consistency-streak current-performance) u1)
+                    u0
+                ))
+            )
+            (map-set StudentPerformance student
+                (merge current-performance {
+                    performance-score: new-score,
+                    milestone-completion-rate: completion-rate,
+                    consistency-streak: streak,
+                    last-activity-block: burn-block-height,
+                })
+            )
+            (ok streak)
+        )
+    )
+)
+
+;; Record specific performance metric
+(define-public (record-performance-metric
+        (student principal)
+        (metric-type (string-ascii 20))
+        (value uint)
+        (trend (string-ascii 10))
+    )
+    (let (
+            (mentor-data (unwrap! (map-get? Mentors tx-sender) err-not-registered))
+        )
+        (asserts! (get verified mentor-data) err-unauthorized)
+        (map-set PerformanceMetrics
+            {
+                student: student,
+                metric-type: metric-type,
+            }
+            {
+                value: value,
+                last-updated: burn-block-height,
+                trend: trend,
+            }
+        )
+        (ok true)
+    )
+)
+
+;; Admin function to create custom achievement template
+(define-public (create-achievement-template
+        (template-key (string-ascii 30))
+        (title (string-ascii 100))
+        (description (string-ascii 200))
+        (points uint)
+        (requirements (string-ascii 150))
+        (category (string-ascii 20))
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-none (map-get? AchievementTemplates template-key))
+            err-achievement-exists
+        )
+        (map-set AchievementTemplates template-key {
+            title: title,
+            description: description,
+            points: points,
+            requirements: requirements,
+            category: category,
+        })
+        (ok true)
+    )
+)
+
+;; Read-only functions for performance analytics
+(define-read-only (get-student-performance (student principal))
+    (ok (map-get? StudentPerformance student))
+)
+
+(define-read-only (get-achievement-details (achievement-id uint))
+    (ok (map-get? Achievements achievement-id))
+)
+
+(define-read-only (get-performance-metric
+        (student principal)
+        (metric-type (string-ascii 20))
+    )
+    (ok (map-get? PerformanceMetrics {
+        student: student,
+        metric-type: metric-type,
+    }))
+)
+
+(define-read-only (get-achievement-template (template-key (string-ascii 30)))
+    (ok (map-get? AchievementTemplates template-key))
+)
+
+;; Calculate student performance rank (simplified scoring)
+(define-read-only (calculate-student-rank (student principal))
+    (let (
+            (performance (default-to {
+                total-achievements: u0,
+                performance-score: u0,
+                milestone-completion-rate: u0,
+                average-submission-time: u0,
+                consistency-streak: u0,
+                last-activity-block: u0,
+                total-points-earned: u0,
+            }
+                (map-get? StudentPerformance student)
+            ))
+        )
+        (ok {
+            rank-score: (+ 
+                (* (get performance-score performance) u2)
+                (get total-points-earned performance)
+                (* (get consistency-streak performance) u10)
+            ),
+            performance-level: (if (>= (get performance-score performance) u90)
+                "excellent"
+                (if (>= (get performance-score performance) u75)
+                    "good"
+                    (if (>= (get performance-score performance) u60)
+                        "satisfactory"
+                        "needs-improvement"
+                    )
+                )
+            ),
+        })
+    )
+)
+
+;; Admin functions for system configuration
+(define-public (update-min-performance-score (new-score uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-score u100) err-invalid-score)
+        (var-set min-performance-score new-score)
+        (ok true)
+    )
+)
+
+(define-public (update-max-achievements-per-student (new-max uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set max-achievements-per-student new-max)
+        (ok true)
+    )
+)
+
+;; Initialize default achievement templates on contract deployment
+(map-set AchievementTemplates "first_milestone"
+    {
+        title: "First Steps",
+        description: "Successfully completed your first milestone",
+        points: u100,
+        requirements: "Complete 1 milestone",
+        category: "milestone",
+    }
+)
+
+(map-set AchievementTemplates "consistent_performer"
+    {
+        title: "Consistency Champion",
+        description: "Maintained high performance for 5 consecutive milestones",
+        points: u250,
+        requirements: "5 milestone streak",
+        category: "consistency",
+    }
+)
+
+(map-set AchievementTemplates "fast_learner"
+    {
+        title: "Speed Demon",
+        description: "Completed milestones faster than average",
+        points: u150,
+        requirements: "Above average speed",
+        category: "speed",
+    }
+)
+
+(map-set AchievementTemplates "excellence_award"
+    {
+        title: "Excellence Award",
+        description: "Achieved performance score above 90%",
+        points: u300,
+        requirements: "90% performance score",
+        category: "excellence",
+    }
+)
