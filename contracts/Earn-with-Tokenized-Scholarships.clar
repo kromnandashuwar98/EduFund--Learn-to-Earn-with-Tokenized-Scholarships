@@ -868,12 +868,10 @@
         (asserts! (get verified mentor-data) err-unauthorized)
         (asserts! (<= new-score u100) err-invalid-score)
         (asserts! (<= completion-rate u100) err-invalid-score)
-        (let (
-                (streak (if (>= new-score (var-get min-performance-score))
-                    (+ (get consistency-streak current-performance) u1)
-                    u0
-                ))
-            )
+        (let ((streak (if (>= new-score (var-get min-performance-score))
+                (+ (get consistency-streak current-performance) u1)
+                u0
+            )))
             (map-set StudentPerformance student
                 (merge current-performance {
                     performance-score: new-score,
@@ -894,21 +892,16 @@
         (value uint)
         (trend (string-ascii 10))
     )
-    (let (
-            (mentor-data (unwrap! (map-get? Mentors tx-sender) err-not-registered))
-        )
+    (let ((mentor-data (unwrap! (map-get? Mentors tx-sender) err-not-registered)))
         (asserts! (get verified mentor-data) err-unauthorized)
-        (map-set PerformanceMetrics
-            {
-                student: student,
-                metric-type: metric-type,
-            }
-            {
-                value: value,
-                last-updated: burn-block-height,
-                trend: trend,
-            }
-        )
+        (map-set PerformanceMetrics {
+            student: student,
+            metric-type: metric-type,
+        } {
+            value: value,
+            last-updated: burn-block-height,
+            trend: trend,
+        })
         (ok true)
     )
 )
@@ -963,22 +956,19 @@
 
 ;; Calculate student performance rank (simplified scoring)
 (define-read-only (calculate-student-rank (student principal))
-    (let (
-            (performance (default-to {
-                total-achievements: u0,
-                performance-score: u0,
-                milestone-completion-rate: u0,
-                average-submission-time: u0,
-                consistency-streak: u0,
-                last-activity-block: u0,
-                total-points-earned: u0,
-            }
-                (map-get? StudentPerformance student)
-            ))
-        )
+    (let ((performance (default-to {
+            total-achievements: u0,
+            performance-score: u0,
+            milestone-completion-rate: u0,
+            average-submission-time: u0,
+            consistency-streak: u0,
+            last-activity-block: u0,
+            total-points-earned: u0,
+        }
+            (map-get? StudentPerformance student)
+        )))
         (ok {
-            rank-score: (+ 
-                (* (get performance-score performance) u2)
+            rank-score: (+ (* (get performance-score performance) u2)
                 (get total-points-earned performance)
                 (* (get consistency-streak performance) u10)
             ),
@@ -1015,42 +1005,91 @@
 )
 
 ;; Initialize default achievement templates on contract deployment
-(map-set AchievementTemplates "first_milestone"
-    {
-        title: "First Steps",
-        description: "Successfully completed your first milestone",
-        points: u100,
-        requirements: "Complete 1 milestone",
-        category: "milestone",
-    }
+(map-set AchievementTemplates "first_milestone" {
+    title: "First Steps",
+    description: "Successfully completed your first milestone",
+    points: u100,
+    requirements: "Complete 1 milestone",
+    category: "milestone",
+})
+
+(map-set AchievementTemplates "consistent_performer" {
+    title: "Consistency Champion",
+    description: "Maintained high performance for 5 consecutive milestones",
+    points: u250,
+    requirements: "5 milestone streak",
+    category: "consistency",
+})
+
+(map-set AchievementTemplates "fast_learner" {
+    title: "Speed Demon",
+    description: "Completed milestones faster than average",
+    points: u150,
+    requirements: "Above average speed",
+    category: "speed",
+})
+
+(map-set AchievementTemplates "excellence_award" {
+    title: "Excellence Award",
+    description: "Achieved performance score above 90%",
+    points: u300,
+    requirements: "90% performance score",
+    category: "excellence",
+})
+
+(define-data-var edufund-admin principal tx-sender)
+(define-data-var edufund-announcement (string-utf8 256) u"")
+(define-data-var edufund-announcement-expires (optional uint) none)
+(define-constant edufund-announcement-version u1)
+
+(define-read-only (edufund-get-admin)
+    (var-get edufund-admin)
 )
 
-(map-set AchievementTemplates "consistent_performer"
-    {
-        title: "Consistency Champion",
-        description: "Maintained high performance for 5 consecutive milestones",
-        points: u250,
-        requirements: "5 milestone streak",
-        category: "consistency",
-    }
+(define-public (edufund-transfer-admin (new-admin principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get edufund-admin)) (err u403))
+        (var-set edufund-admin new-admin)
+        (ok true)
+    )
 )
 
-(map-set AchievementTemplates "fast_learner"
-    {
-        title: "Speed Demon",
-        description: "Completed milestones faster than average",
-        points: u150,
-        requirements: "Above average speed",
-        category: "speed",
-    }
+(define-public (edufund-set-announcement
+        (message (string-utf8 256))
+        (expires-at (optional uint))
+    )
+    (begin
+        (asserts! (is-eq tx-sender (var-get edufund-admin)) (err u403))
+        (var-set edufund-announcement message)
+        (var-set edufund-announcement-expires expires-at)
+        (ok true)
+    )
 )
 
-(map-set AchievementTemplates "excellence_award"
-    {
-        title: "Excellence Award",
-        description: "Achieved performance score above 90%",
-        points: u300,
-        requirements: "90% performance score",
-        category: "excellence",
-    }
+(define-public (edufund-clear-announcement)
+    (begin
+        (asserts! (is-eq tx-sender (var-get edufund-admin)) (err u403))
+        (var-set edufund-announcement u"")
+        (var-set edufund-announcement-expires none)
+        (ok true)
+    )
+)
+
+(define-read-only (edufund-get-announcement)
+    (let (
+            (msg (var-get edufund-announcement))
+            (exp (var-get edufund-announcement-expires))
+        )
+        (match exp
+            expires-at (if (> burn-block-height expires-at)
+                none
+                (some msg)
+            )
+            (some msg)
+        )
+    )
+)
+
+(define-read-only (edufund-get-announcement-version)
+    edufund-announcement-version
 )
