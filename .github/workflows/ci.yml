@@ -1,0 +1,35 @@
+name: EduFund Smart Contract CI
+on:
+  push:
+    branches: [ main, cargo, develop ]
+  pull_request:
+    branches: [ main, cargo ]
+
+jobs:
+  test:
+    name: "Contract Testing & Validation"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+        
+      - name: "Setup Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: "Install dependencies"
+        run: npm ci
+        
+      - name: "Check contract syntax"
+        uses: docker://hirosystems/clarinet:latest
+        with:
+          args: check
+          
+      - name: "Run contract tests"
+        run: npm test
+        
+      - name: "Generate test coverage report"
+        run: npm run test:report
+        continue-on-error: true
